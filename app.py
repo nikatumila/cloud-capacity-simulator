@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 st.set_page_config(page_title="Simulasi Beban Cloud Hosting", layout="wide")
 
@@ -70,9 +71,10 @@ t_infleksi = np.log((M - P0) / P0) / r_base if M > P0 else 0.0
 t_infleksi_int = waktu_pertama(p_intervensi, p_infleksi)
 mae = np.mean(np.abs(p_normal - p_analitis))
 
-tab1, tab2, tab3 = st.tabs(["Normal vs Intervensi",
-                            "Sensitivitas Kapasitas M",
-                            "Verifikasi Galat"])
+tab1, tab2, tab3, tab4 = st.tabs(["Normal vs Intervensi",
+                                  "Sensitivitas Kapasitas M",
+                                  "Verifikasi Galat",
+                                  "Validasi Data Nyata"])
 
 # ---------------------------------------------------------------
 # Tab 1: Normal vs Intervensi
@@ -144,3 +146,78 @@ with tab3:
     ax3.grid(True, linestyle="--", alpha=0.5)
     ax3.legend(loc="lower right")
     st.pyplot(fig3)
+
+# ---------------------------------------------------------------
+# Tab 4: Validasi dengan data monitoring nyata
+# ---------------------------------------------------------------
+with tab4:
+    st.markdown("Rata-rata trafik masuk bulanan perangkat klaster **Cloud Star Hosting** (data center "
+                "Jakarta), Desember 2024 – November 2026, kapasitas link 10 Gbps. "
+                "Angka dibaca dari grafik monitoring Observium 3 tahun.")
+    BULAN = ["Des 24", "Jan 25", "Feb 25", "Mar 25", "Apr 25", "Mei 25", "Jun 25", "Jul 25",
+             "Agu 25", "Sep 25", "Okt 25", "Nov 25", "Des 25", "Jan 26", "Feb 26", "Mar 26",
+             "Apr 26", "Mei 26", "Jun 26", "Jul 26", "Agu 26", "Sep 26", "Okt 26", "Nov 26"]
+    TRAFIK = np.array([0.688, 0.687, 1.293, 1.729, 2.600, 2.911, 2.942, 2.705, 1.721, 1.597, 1.619, 1.666,
+                       1.869, 1.899, 1.998, 2.233, 2.099, 2.181, 2.282, 2.268, 2.279, 2.367, 2.515, 2.556])
+    PROMO = np.array([4, 5, 6, 7])  # April–Juli 2025: promo upgrade gratis
+    KAPASITAS = 10.0
+
+    unggah = st.file_uploader("Opsional: unggah CSV sendiri (kolom: bulan, trafik_gbps)", type="csv")
+    if unggah is not None:
+        data = np.genfromtxt(unggah, delimiter=",", names=True, dtype=None, encoding="utf-8")
+        TRAFIK = np.asarray(data["trafik_gbps"], dtype=float)
+        BULAN = [str(b) for b in data["bulan"]]
+        PROMO = np.array([], dtype=int)
+    t_data = np.arange(len(TRAFIK))
+    kecualikan = st.checkbox("Keluarkan bulan promo (Apr–Jul 2025) dari fitting", value=True)
+    pakai = np.ones(len(TRAFIK), bool)
+    if kecualikan and len(PROMO):
+        pakai[PROMO] = False
+
+    def logistik(t, M_, r_, P0_):
+        return M_ / (1 + ((M_ - P0_) / P0_) * np.exp(-r_ * t))
+
+    def eksponensial(t, r_, P0_):
+        return P0_ * np.exp(r_ * t)
+
+    try:
+        (M_f, r_f, P0_f), kov = curve_fit(logistik, t_data[pakai], TRAFIK[pakai],
+                                          p0=[TRAFIK.max() * 1.2, 0.2, TRAFIK[0]], maxfev=20000)
+        (r_e, P0_e), _ = curve_fit(eksponensial, t_data[pakai], TRAFIK[pakai], p0=[0.05, TRAFIK[0]], maxfev=20000)
+    except RuntimeError:
+        st.error("Fitting tidak konvergen untuk data ini.")
+        st.stop()
+    galat_M, galat_r = np.sqrt(np.diag(kov))[:2]
+    mae_log = np.mean(np.abs(logistik(t_data[pakai], M_f, r_f, P0_f) - TRAFIK[pakai]))
+    mae_exp = np.mean(np.abs(eksponensial(t_data[pakai], r_e, P0_e) - TRAFIK[pakai]))
+    t_inf_f = np.log((M_f - P0_f) / P0_f) / r_f
+
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("M hasil fitting", f"{M_f:.2f} Gbps", f"± {galat_M:.2f} · {M_f / KAPASITAS * 100:.1f}% kapasitas", delta_color="off")
+    e2.metric("Laju r hasil fitting", f"{r_f:.3f} / bulan", f"± {galat_r:.3f}", delta_color="off")
+    e3.metric("Titik infleksi", f"Bulan ke-{t_inf_f:.2f}")
+    e4.metric("MAE logistik vs eksponensial", f"{mae_log:.3f} vs {mae_exp:.3f} Gbps")
+    if kecualikan and len(PROMO):
+        rasio = np.mean(TRAFIK[PROMO] / logistik(PROMO, M_f, r_f, P0_f))
+        st.info(f"Selama promo upgrade gratis, trafik nyata rata-rata {rasio:.1f}× dari prediksi model tanpa promo, "
+                "lalu turun kembali setelah promo berakhir.")
+
+    tt = np.linspace(0, len(TRAFIK) - 1, 300)
+    fig4, ax4 = plt.subplots(figsize=(10, 5))
+    if len(PROMO):
+        ax4.axvspan(PROMO.min() - 0.5, PROMO.max() + 0.5, color="orange", alpha=0.12, label="Periode promo")
+    ax4.plot(tt, logistik(tt, M_f, r_f, P0_f), color="#1f3864", linewidth=2.4, label="Model logistik (fitting)")
+    ax4.plot(tt, eksponensial(tt, r_e, P0_e), color="gray", linestyle="--", label="Model eksponensial (pembanding)")
+    ax4.axhline(M_f, color="red", linestyle=":", label=f"M = {M_f:.2f} Gbps")
+    ax4.scatter(t_data[pakai], TRAFIK[pakai], color="#1f77b4", zorder=3, label="Data nyata")
+    if not pakai.all():
+        ax4.scatter(t_data[~pakai], TRAFIK[~pakai], color="#ff7f0e", marker="D", zorder=3, label="Data nyata saat promo")
+    ax4.set_xticks(t_data[::3])
+    ax4.set_xticklabels(BULAN[::3])
+    ax4.set_xlabel("Bulan")
+    ax4.set_ylabel("Trafik masuk (Gbps)")
+    ax4.set_ylim(0, max(TRAFIK.max(), M_f) * 1.3)
+    ax4.set_title("Data Monitoring Nyata vs Model Logistik", fontsize=13, fontweight="bold")
+    ax4.grid(True, linestyle="--", alpha=0.5)
+    ax4.legend(loc="upper left", ncol=2, fontsize=9)
+    st.pyplot(fig4)
